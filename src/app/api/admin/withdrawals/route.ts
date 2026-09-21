@@ -78,15 +78,17 @@ export async function POST(request: NextRequest) {
     }
 
     // ── approve: actually send the real OxaPay payout now ──
-    const OXA_PAY_API_KEY = process.env.OXA_PAY_API_KEY;
+    // OxaPay issues a separate payout_api_key from the merchant/payment
+    // API key — using the wrong one here will make every payout fail auth.
+    const OXA_PAY_PAYOUT_API_KEY = process.env.OXA_PAY_PAYOUT_API_KEY || process.env.OXA_PAY_API_KEY;
     const OXA_PAY_BASE_URL = process.env.OXA_PAY_BASE_URL || 'https://api.oxapay.com';
-    if (!OXA_PAY_API_KEY) {
-      return NextResponse.json({ success: false, error: 'Payout service is not configured (missing OXA_PAY_API_KEY)' }, { status: 500 });
+    if (!OXA_PAY_PAYOUT_API_KEY) {
+      return NextResponse.json({ success: false, error: 'Payout service is not configured (missing OXA_PAY_PAYOUT_API_KEY)' }, { status: 500 });
     }
 
     const payoutResponse = await fetch(`${OXA_PAY_BASE_URL}/v1/payout`, {
       method: 'POST',
-      headers: { payout_api_key: OXA_PAY_API_KEY, 'Content-Type': 'application/json' },
+      headers: { payout_api_key: OXA_PAY_PAYOUT_API_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         address: reqData.walletAddress,
         network: reqData.networkName,
