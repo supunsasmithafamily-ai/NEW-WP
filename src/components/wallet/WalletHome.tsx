@@ -6,13 +6,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Plus, Gift, ArrowDownLeft, TrendingUp, TrendingDown, ChevronRight, Loader2, Play } from 'lucide-react';
 import { collection, query, where, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { loadAdState } from '@/lib/adState';
 import { CoinIcon } from '@/components/three/CoinIcon';
 import { GlassmorphismCard } from '@/components/three/GlassmorphismCard';
 import { useWalletStore } from '@/lib/store';
 import { useAuth } from '@/hooks/useAuth';
 import WithdrawForm from '@/components/wallet/WithdrawForm';
 
-const AdRewardPlayer = dynamic(() => import('@/components/ads/AdRewardPlayer'), { ssr: false });
+const AdRewardOverlay = dynamic(() => import('@/components/ads/AdRewardOverlay'), { ssr: false });
 
 const coinPackages = [
   { id: 'pkg1', coins: 100, price: 0.99, bonus: 0, badge: null },
@@ -91,6 +92,11 @@ export default function WalletHome() {
   const [showWithdraw, setShowWithdraw] = useState(false);
   const [showAd, setShowAd] = useState(false);
   const [adsWatchedToday, setAdsWatchedToday] = useState(0);
+  useEffect(() => {
+    // Optimistic UI count from the shared local cache — the real daily
+    // cap is enforced server-side regardless (see /api/coins/ad-reward).
+    setAdsWatchedToday(loadAdState().adsWatchedToday);
+  }, []);
   const MAX_ADS = 10;
   const [purchasingId, setPurchasingId] = useState<string | null>(null);
   const { user } = useAuth();
@@ -253,15 +259,15 @@ export default function WalletHome() {
           <span className="text-xs font-medium" style={{ color: '#E9EDEF' }}>Withdraw</span>
         </GlassmorphismCard>
 
-        {/* Watch Ad — earn 50 coins, max 10/day */}
+        {/* Free Coins — watch videos, earn 50 coins each, up to 10/day */}
         <GlassmorphismCard
           className="flex flex-col items-center gap-2 py-5 col-span-2"
-          onClick={() => adsWatchedToday < MAX_ADS && setShowAd(true)}
+          onClick={() => setShowAd(true)}
         >
           <div className="w-11 h-11 rounded-full flex items-center justify-center" style={{ background: 'rgba(255,165,0,0.15)' }}>
             <Play className="w-5 h-5" style={{ color: '#FFA500' }} />
           </div>
-          <span className="text-xs font-medium" style={{ color: '#E9EDEF' }}>Watch Ad +50 coins</span>
+          <span className="text-xs font-medium" style={{ color: '#E9EDEF' }}>Free Coins — Watch Videos</span>
           <span className="text-[10px]" style={{ color: adsWatchedToday >= MAX_ADS ? '#EA4335' : '#8696A0' }}>
             {adsWatchedToday}/{MAX_ADS} today
           </span>
@@ -465,11 +471,13 @@ export default function WalletHome() {
         coinBalance={displayBalance}
       />
 
-      {/* ── Ad Reward Player ── */}
+      {/* ── Free Coins (real VAST video ads) ── */}
       {showAd && (
-        <AdRewardPlayer
-          onClose={() => setShowAd(false)}
-          onRewarded={(coins) => setAdsWatchedToday((prev) => Math.min(prev + 1, MAX_ADS))}
+        <AdRewardOverlay
+          onClose={() => {
+            setShowAd(false);
+            setAdsWatchedToday(loadAdState().adsWatchedToday);
+          }}
         />
       )}
     </div>
