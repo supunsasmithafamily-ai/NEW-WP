@@ -1,45 +1,21 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Gift, X, Play, Clock } from 'lucide-react';
+import { Gift, X, Play, ChevronLeft } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { useWalletStore } from '@/lib/store';
+import VastAdPlayer from './VastAdPlayer';
+import { AD_COINS, MAX_ADS_PER_DAY, loadAdState, saveAdState, type AdState } from '@/lib/adState';
 
-const AD_COINS = 50;          // Coins per ad watch
-const MAX_ADS_PER_DAY = 10;   // Maximum daily ad views
-const SKIP_AFTER_SECONDS = 5; // Seconds before skip button appears
-const AD_TOTAL_SECONDS = 15;  // Total ad duration before reward
-
-const STORAGE_KEY = 'wp_ad_state';
-
-interface AdState {
-  date: string;          // 'YYYY-MM-DD' — resets daily
-  adsWatchedToday: number;
-  lastDailyBonusDone: boolean;
-}
-
-function todayStr() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function loadAdState(): AdState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as AdState;
-      if (parsed.date === todayStr()) return parsed;
-    }
-  } catch { /* ignore */ }
-  return { date: todayStr(), adsWatchedToday: 0, lastDailyBonusDone: false };
-}
-
-function saveAdState(state: AdState) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch { /* ignore */ }
-}
+// Set NEXT_PUBLIC_VAST_AD_TAG_URL in your environment to your ad network's
+// VAST tag. Falls back to an empty string (which surfaces as a clear error
+// in the UI rather than silently pretending an ad played) if not set.
+const VAST_TAG_URL = process.env.NEXT_PUBLIC_VAST_AD_TAG_URL || '';
 
 interface Props {
-  /** Pass true to trigger after login so the daily-bonus flow also runs */
+  /** Pass true when opened automatically right after login, so the daily
+   *  login bonus is offered alongside the first video. */
   afterLogin?: boolean;
   onClose: () => void;
 }
@@ -49,15 +25,12 @@ export default function AdRewardOverlay({ afterLogin, onClose }: Props) {
   const { setCoinBalance } = useWalletStore();
 
   const [adState, setAdState] = useState<AdState>(loadAdState());
-  const [phase, setPhase] = useState<'offer' | 'watching' | 'done' | 'limit'>('offer');
-  const [secondsLeft, setSecondsLeft] = useState(AD_TOTAL_SECONDS);
-  const [canSkip, setCanSkip] = useState(false);
+  const [phase, setPhase] = useState<'offer' | 'watching' | 'done' | 'limit' | 'error'>('offer');
   const [coinsEarned, setCoinsEarned] = useState(0);
   const [dailyBonusDone, setDailyBonusDone] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const adContainerRef = useRef<HTMLDivElement>(null);
+  const [errorMessage, setErrorMessage] = useState('');
 
-  // Claim daily login bonus (called once per day, after first ad or standalone)
+  // Claim the daily login bonus (once per ~day â€” enforced server-side too).
   const claimDailyBonus = useCallback(async () => {
     if (!user?.uid || adState.lastDailyBonusDone) return;
     try {
@@ -74,56 +47,26 @@ export default function AdRewardOverlay({ afterLogin, onClose }: Props) {
         setAdState(updated);
         saveAdState(updated);
       }
-    } catch { /* non-critical */ }
+    } catch {
+      /* non-critical â€” the ad reward itself still goes through */
+    }
   }, [user, adState, setCoinBalance]);
-
-  // Load HilltopAds script into the ad container
-  const loadAd = useCallback(() => {
-    if (!adContainerRef.current) return;
-    adContainerRef.current.innerHTML = '';
-
-    // HilltopAds in-page push or interstitial banner
-    // Replace ZONE_ID with your actual HilltopAds zone ID from your account
-    const script = document.createElement('script');
-    script.async = true;
-    script.src = '//jsc.hilltopads.net/ZONE_ID.js'; // ← replace ZONE_ID
-    script.setAttribute('data-cfasync', 'false');
-    adContainerRef.current.appendChild(script);
-
-    // Fallback visible placeholder in case the script hasn't loaded / is
-    // blocked (ad blockers) — the timer and coin reward still run so the
-    // user experience degrades gracefully.
-    const fallback = document.createElement('div');
-    fallback.style.cssText =
-      'display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;';
-    fallback.innerHTML =
-      '<span style="color:#8696A0;font-size:12px;">Advertisement</span>' +
-      '<span style="color:#4a5568;font-size:11px;">(Ad content loads here)</span>';
-    adContainerRef.current.appendChild(fallback);
-  }, []);
 
   const startWatching = useCallback(() => {
     if (adState.adsWatchedToday >= MAX_ADS_PER_DAY) {
       setPhase('limit');
       return;
     }
+    if (!VAST_TAG_URL) {
+      setErrorMessage('Ads are not configured yet.');
+      setPhase('error');
+      return;
+    }
     setPhase('watching');
-    setSecondsLeft(AD_TOTAL_SECONDS);
-    setCanSkip(false);
-    loadAd();
+  }, [adState.adsWatchedToday]);
 
-    let elapsed = 0;
-    timerRef.current = setInterval(() => {
-      elapsed++;
-      setSecondsLeft(AD_TOTAL_SECONDS - elapsed);
-      if (elapsed === SKIP_AFTER_SECONDS) setCanSkip(true);
-      if (elapsed >= AD_TOTAL_SECONDS) {
-        clearInterval(timerRef.current!);
-        handleAdComplete();
-      }
-    }, 1000);
-  }, [adState.adsWatchedToday, loadAd]);
-
+  // Called only once the real ad video has actually finished playing â€”
+  // VastAdPlayer has no skip button, so this is a genuine "watched it".
   const handleAdComplete = useCallback(async () => {
     if (!user?.uid) return;
     try {
@@ -136,41 +79,42 @@ export default function AdRewardOverlay({ afterLogin, onClose }: Props) {
       if (data.success) {
         setCoinBalance(data.newBalance);
         setCoinsEarned(AD_COINS);
+      } else if (data.error === 'Daily ad limit reached') {
+        setPhase('limit');
+        return;
       }
-    } catch { /* non-critical — still show the success screen */ }
+    } catch {
+      /* non-critical â€” still show the success screen; balance will
+         reconcile next time the profile is fetched */
+    }
 
-    const updated: AdState = {
-      ...adState,
-      adsWatchedToday: adState.adsWatchedToday + 1,
-    };
+    const updated: AdState = { ...adState, adsWatchedToday: adState.adsWatchedToday + 1 };
     setAdState(updated);
     saveAdState(updated);
     setPhase('done');
 
-    // Also claim daily login bonus on the first ad of the day
     if (!adState.lastDailyBonusDone) {
       await claimDailyBonus();
     }
   }, [user, adState, setCoinBalance, claimDailyBonus]);
 
-  const handleSkip = useCallback(() => {
-    if (!canSkip) return;
-    clearInterval(timerRef.current!);
-    handleAdComplete();
-  }, [canSkip, handleAdComplete]);
-
-  useEffect(() => {
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  const handleAdError = useCallback((reason: string) => {
+    setErrorMessage(reason);
+    setPhase('error');
   }, []);
 
-  // Auto-claim daily bonus on login even without watching an ad
+  // Auto-claim daily bonus on login even before any ad is watched, so the
+  // popup can lead with "you already got today's bonus, want more coins?"
+  // when relevant instead of double-offering it.
   useEffect(() => {
     if (afterLogin && !adState.lastDailyBonusDone && user?.uid) {
       claimDailyBonus();
     }
-  }, [afterLogin, user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [afterLogin, user?.uid]);
 
   const adsLeft = MAX_ADS_PER_DAY - adState.adsWatchedToday;
+  const videoNumber = adState.adsWatchedToday + 1;
 
   return (
     <AnimatePresence>
@@ -178,156 +122,152 @@ export default function AdRewardOverlay({ afterLogin, onClose }: Props) {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-[80] bg-black/70 flex items-end justify-center"
+        className="fixed inset-0 z-[80] bg-[#0B141A] flex flex-col w-full max-w-lg mx-auto"
       >
-        <motion.div
-          initial={{ y: '100%' }}
-          animate={{ y: 0 }}
-          exit={{ y: '100%' }}
-          transition={{ type: 'spring', damping: 28, stiffness: 300 }}
-          className="w-full max-w-lg bg-[#111B21] rounded-t-2xl overflow-hidden"
-        >
-          {/* Header */}
-          <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
-            <div className="flex items-center gap-2">
-              <Gift className="w-4.5 h-4.5 text-[#FFD700]" />
-              <span className="text-white text-sm font-semibold">Watch Ads → Earn Coins</span>
-            </div>
-            {phase !== 'watching' && (
-              <button onClick={onClose} className="text-white/40 hover:text-white">
-                <X className="w-5 h-5" />
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3.5 border-b border-white/10 shrink-0">
+          <div className="flex items-center gap-2">
+            {phase === 'watching' ? (
+              <span className="w-5 h-5" /> // keep header height stable, no back/close mid-ad
+            ) : (
+              <button onClick={onClose} className="text-white/60">
+                <ChevronLeft className="w-5 h-5" />
               </button>
             )}
+            <Gift className="w-4.5 h-4.5 text-[#FFD700]" />
+            <span className="text-white text-sm font-semibold">Free Coins</span>
           </div>
+          {phase === 'watching' ? (
+            <span className="text-white/40 text-xs">Video {Math.min(videoNumber, MAX_ADS_PER_DAY)} of {MAX_ADS_PER_DAY}</span>
+          ) : (
+            <button onClick={onClose} className="text-white/40 hover:text-white">
+              <X className="w-5 h-5" />
+            </button>
+          )}
+        </div>
 
-          {/* Body */}
-          <div className="px-5 py-5">
-            {/* OFFER */}
-            {phase === 'offer' && (
-              <div className="flex flex-col items-center gap-4">
-                <div
-                  className="w-16 h-16 rounded-2xl flex items-center justify-center"
-                  style={{ background: 'linear-gradient(135deg,#FFD700,#FFA500)' }}
-                >
-                  <span className="text-2xl">🎁</span>
-                </div>
-                <div className="text-center">
-                  <p className="text-white font-semibold">Earn {AD_COINS} coins per ad</p>
-                  <p className="text-white/50 text-xs mt-1">Up to {MAX_ADS_PER_DAY} ads per day</p>
-                  {adsLeft > 0 ? (
-                    <p className="text-[#25D366] text-xs mt-0.5">{adsLeft} ads remaining today</p>
-                  ) : (
-                    <p className="text-red-400 text-xs mt-0.5">No more ads available today</p>
-                  )}
-                </div>
-                <button
-                  onClick={startWatching}
-                  disabled={adsLeft === 0}
-                  className="w-full py-3 rounded-xl font-semibold text-sm disabled:opacity-40"
-                  style={{ background: 'linear-gradient(135deg,#25D366,#128C7E)', color: '#000' }}
-                >
-                  <Play className="w-4 h-4 inline mr-1.5" />
-                  Watch Ad ({adsLeft}/{MAX_ADS_PER_DAY} left)
-                </button>
-                <button onClick={onClose} className="text-white/30 text-xs">Skip for now</button>
+        {/* Body */}
+        <div className="flex-1 flex flex-col overflow-y-auto">
+          {/* OFFER */}
+          {phase === 'offer' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
+              <div
+                className="w-16 h-16 rounded-2xl flex items-center justify-center"
+                style={{ background: 'linear-gradient(135deg,#FFD700,#FFA500)' }}
+              >
+                <span className="text-2xl">ðŸŽ</span>
               </div>
-            )}
+              <div className="text-center">
+                {afterLogin && !dailyBonusDone && !adState.lastDailyBonusDone ? (
+                  <p className="text-white font-semibold">Daily Login â€” Free Coins!</p>
+                ) : (
+                  <p className="text-white font-semibold">Watch videos, earn coins</p>
+                )}
+                <p className="text-white/50 text-xs mt-1">Earn {AD_COINS} coins per video</p>
+                {adsLeft > 0 ? (
+                  <p className="text-[#25D366] text-xs mt-0.5">{adsLeft} of {MAX_ADS_PER_DAY} videos left today</p>
+                ) : (
+                  <p className="text-red-400 text-xs mt-0.5">No more videos available today</p>
+                )}
+              </div>
+              <button
+                onClick={startWatching}
+                disabled={adsLeft === 0}
+                className="w-full py-3 rounded-xl font-semibold text-sm disabled:opacity-40"
+                style={{ background: 'linear-gradient(135deg,#25D366,#128C7E)', color: '#000' }}
+              >
+                <Play className="w-4 h-4 inline mr-1.5" />
+                Watch Video ({adsLeft}/{MAX_ADS_PER_DAY} left)
+              </button>
+              <button onClick={onClose} className="text-white/30 text-xs">Skip for now</button>
+            </div>
+          )}
 
-            {/* WATCHING */}
-            {phase === 'watching' && (
-              <div className="flex flex-col gap-3">
-                {/* Ad container */}
-                <div
-                  ref={adContainerRef}
-                  className="w-full rounded-xl overflow-hidden bg-[#1F2C34]"
-                  style={{ minHeight: '200px' }}
-                />
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 text-white/50 text-xs">
-                    <Clock className="w-3.5 h-3.5" />
-                    <span>{secondsLeft}s</span>
-                  </div>
+          {/* WATCHING â€” real VAST ad, no skip until it actually ends */}
+          {phase === 'watching' && (
+            <div className="flex-1">
+              <VastAdPlayer
+                vastTagUrl={VAST_TAG_URL}
+                onComplete={handleAdComplete}
+                onError={handleAdError}
+              />
+            </div>
+          )}
+
+          {/* DONE */}
+          {phase === 'done' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
+              <div
+                className="w-16 h-16 rounded-2xl flex items-center justify-center"
+                style={{ background: 'linear-gradient(135deg,#25D366,#128C7E)' }}
+              >
+                <span className="text-2xl">âœ…</span>
+              </div>
+              <div className="text-center">
+                <p className="text-white font-semibold">+{coinsEarned} coins earned!</p>
+                {dailyBonusDone && (
+                  <p className="text-[#FFD700] text-xs mt-0.5">+100 daily login bonus!</p>
+                )}
+                <p className="text-white/40 text-xs mt-1">
+                  {MAX_ADS_PER_DAY - adState.adsWatchedToday} more videos available today
+                </p>
+              </div>
+              <div className="flex gap-3 w-full">
+                {adState.adsWatchedToday < MAX_ADS_PER_DAY && (
                   <button
-                    onClick={handleSkip}
-                    disabled={!canSkip}
-                    className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all ${
-                      canSkip
-                        ? 'bg-white text-black'
-                        : 'bg-white/10 text-white/30 cursor-not-allowed'
-                    }`}
+                    onClick={startWatching}
+                    className="flex-1 py-2.5 rounded-xl text-sm font-semibold"
+                    style={{ background: 'linear-gradient(135deg,#25D366,#128C7E)', color: '#000' }}
                   >
-                    {canSkip ? 'Skip →' : `Skip in ${SKIP_AFTER_SECONDS - (AD_TOTAL_SECONDS - secondsLeft)}s`}
+                    Watch Another
                   </button>
-                </div>
-                <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
-                  <div
-                    className="h-full bg-[#25D366] transition-all duration-1000"
-                    style={{ width: `${((AD_TOTAL_SECONDS - secondsLeft) / AD_TOTAL_SECONDS) * 100}%` }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* DONE */}
-            {phase === 'done' && (
-              <div className="flex flex-col items-center gap-4 py-3">
-                <div
-                  className="w-16 h-16 rounded-2xl flex items-center justify-center"
-                  style={{ background: 'linear-gradient(135deg,#25D366,#128C7E)' }}
-                >
-                  <span className="text-2xl">✅</span>
-                </div>
-                <div className="text-center">
-                  <p className="text-white font-semibold">
-                    +{coinsEarned} coins earned!
-                  </p>
-                  {dailyBonusDone && (
-                    <p className="text-[#FFD700] text-xs mt-0.5">+100 daily login bonus!</p>
-                  )}
-                  <p className="text-white/40 text-xs mt-1">
-                    {MAX_ADS_PER_DAY - adState.adsWatchedToday} more ads available today
-                  </p>
-                </div>
-                <div className="flex gap-3 w-full">
-                  {adState.adsWatchedToday < MAX_ADS_PER_DAY && (
-                    <button
-                      onClick={startWatching}
-                      className="flex-1 py-2.5 rounded-xl text-sm font-semibold"
-                      style={{ background: 'linear-gradient(135deg,#25D366,#128C7E)', color: '#000' }}
-                    >
-                      Watch Another
-                    </button>
-                  )}
-                  <button
-                    onClick={onClose}
-                    className="flex-1 py-2.5 rounded-xl bg-white/5 text-white text-sm font-semibold"
-                  >
-                    Done
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* LIMIT */}
-            {phase === 'limit' && (
-              <div className="flex flex-col items-center gap-4 py-3">
-                <span className="text-4xl">⏰</span>
-                <div className="text-center">
-                  <p className="text-white font-semibold">Daily limit reached</p>
-                  <p className="text-white/40 text-xs mt-1">
-                    You've watched {MAX_ADS_PER_DAY} ads today. Come back tomorrow!
-                  </p>
-                </div>
+                )}
                 <button
                   onClick={onClose}
-                  className="w-full py-2.5 rounded-xl bg-white/5 text-white text-sm font-semibold"
+                  className="flex-1 py-2.5 rounded-xl bg-white/5 text-white text-sm font-semibold"
                 >
-                  Close
+                  Done
                 </button>
               </div>
-            )}
-          </div>
-        </motion.div>
+            </div>
+          )}
+
+          {/* LIMIT */}
+          {phase === 'limit' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
+              <span className="text-4xl">â°</span>
+              <div className="text-center">
+                <p className="text-white font-semibold">Daily limit reached</p>
+                <p className="text-white/40 text-xs mt-1">
+                  You've watched {MAX_ADS_PER_DAY} videos today. Come back tomorrow!
+                </p>
+              </div>
+              <button
+                onClick={onClose}
+                className="w-full py-2.5 rounded-xl bg-white/5 text-white text-sm font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          )}
+
+          {/* ERROR */}
+          {phase === 'error' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 px-6">
+              <span className="text-4xl">âš ï¸</span>
+              <div className="text-center">
+                <p className="text-white font-semibold">Couldn't load the video</p>
+                <p className="text-white/40 text-xs mt-1">{errorMessage || 'Please try again in a moment.'}</p>
+              </div>
+              <button
+                onClick={() => setPhase('offer')}
+                className="w-full py-2.5 rounded-xl bg-white/5 text-white text-sm font-semibold"
+              >
+                Back
+              </button>
+            </div>
+          )}
+        </div>
       </motion.div>
     </AnimatePresence>
   );
