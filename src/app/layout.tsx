@@ -30,6 +30,10 @@ export const metadata: Metadata = {
     description: "WhatsApp-inspired PWA with live streaming and social features",
     type: "website",
   },
+  other: {
+    // HilltopAds site-ownership verification tag.
+    "73f796404bab0afead7fa20af7792cc3d4bc32a0": "73f796404bab0afead7fa20af7792cc3d4bc32a0",
+  },
 };
 
 export const viewport: Viewport = {
