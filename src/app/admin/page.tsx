@@ -18,7 +18,11 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 
-const ADMIN_EMAIL = 'supunsasmithafamily@gmail.com';
+// Client-side gate only decides whether to show the admin UI — the real
+// protection is server-side (requireAdmin in every /api/admin/* route
+// verifies the signed-in user's Firebase ID token against ADMIN_EMAIL).
+// Needs the NEXT_PUBLIC_ prefix since this runs in the browser.
+const ADMIN_EMAIL = process.env.NEXT_PUBLIC_ADMIN_EMAIL || '';
 
 type Tab = 'users' | 'transactions' | 'withdrawals' | 'live';
 
@@ -89,7 +93,7 @@ export default function AdminPage() {
   const { user, isLoading } = useAuth();
   const [tab, setTab] = useState<Tab>('users');
 
-  const isAdmin = user?.email === ADMIN_EMAIL;
+  const isAdmin = !!ADMIN_EMAIL && user?.email === ADMIN_EMAIL;
 
   if (isLoading) {
     return (
