@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
   Phone,
@@ -31,8 +31,8 @@ import {
 import { GlassmorphismCard } from '@/components/three/GlassmorphismCard';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
-import { updateProfile } from 'firebase/auth';
-import { doc, setDoc } from 'firebase/firestore';
+import { updateProfile, EmailAuthProvider, reauthenticateWithCredential, verifyBeforeUpdateEmail } from 'firebase/auth';
+import { doc, setDoc, onSnapshot } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 
 // ─── Types ────────────────────────────────────────────
@@ -93,7 +93,7 @@ export default function SettingsHome() {
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileSaveError, setProfileSaveError] = useState('');
 
-  const [settings, setSettings] = useState({
+  const DEFAULT_SETTINGS = {
     // Privacy
     showOnline: true,
     readReceipts: true,
@@ -104,12 +104,48 @@ export default function SettingsHome() {
     giftNotifications: true,
     // Streaming
     allowGifts: true,
+    streamQuality: 'Auto' as 'Auto' | 'High' | 'Medium' | 'Low',
+    minGiftValue: 10,
     // App
     darkMode: true,
-  });
+  };
 
-  const toggleSetting = (key: string, value: boolean) => {
-    setSettings((prev) => ({ ...prev, [key]: value }));
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [savedWallet, setSavedWallet] = useState<{ address: string; network: string } | null>(null);
+
+  // Load the user's real saved settings from Firestore (falls back to the
+  // defaults above for a brand-new account that has never saved any yet),
+  // and keep listening so a change made on another device stays in sync.
+  useEffect(() => {
+    if (!user?.uid) return;
+    const unsub = onSnapshot(doc(db, 'users', user.uid), (snap) => {
+      const data = snap.data();
+      if (data?.settings) setSettings((prev) => ({ ...prev, ...data.settings }));
+      setPhoneNumber(data?.phoneNumber || '');
+      setSavedWallet(data?.withdrawal?.address ? data.withdrawal : null);
+    });
+    return () => unsub();
+  }, [user?.uid]);
+
+  // Persists to Firestore immediately — these are simple preference flags,
+  // not something that needs debouncing or a separate "Save" step.
+  const saveSettings = useCallback(async (next: typeof DEFAULT_SETTINGS) => {
+    if (!user?.uid) return;
+    try {
+      await setDoc(doc(db, 'users', user.uid), { settings: next }, { merge: true });
+    } catch {
+      // Non-fatal — the UI already reflects the change locally; it will
+      // just fail to persist until the next successful save.
+    }
+  }, [user?.uid]);
+
+  const toggleSetting = (key: keyof typeof DEFAULT_SETTINGS, value: boolean) => {
+    setSettings((prev) => {
+      const next = { ...prev, [key]: value };
+      saveSettings(next);
+      return next;
+    });
   };
 
   // ═══════════════════════════════════════════════════════
@@ -152,28 +188,103 @@ export default function SettingsHome() {
   }, [editName, editPhotoURL]);
 
   const handlePhoneClick = useCallback(() => {
-    alert('Phone number editing is coming soon.');
-  }, []);
+    const input = prompt('Phone number:', phoneNumber || '');
+    if (input === null || !user?.uid) return;
+    const trimmed = input.trim();
+    setPhoneNumber(trimmed);
+    setDoc(doc(db, 'users', user.uid), { phoneNumber: trimmed }, { merge: true }).catch(() => {
+      alert('Could not save your phone number. Please try again.');
+    });
+  }, [phoneNumber, user?.uid]);
 
-  const handleEmailClick = useCallback(() => {
-    alert(`Your account email is ${displayUser.email || 'not set'}. Email editing is coming soon.`);
+  const handleEmailClick = useCallback(async () => {
+    if (!auth.currentUser) return;
+    const usesPassword = auth.currentUser.providerData.some((p) => p.providerId === 'password');
+    if (!usesPassword) {
+      alert(
+        `Your account email is ${displayUser.email || 'not set'}.\n\nYou signed in with Google, so your email is managed by your Google account and can't be changed here.`
+      );
+      return;
+    }
+    const newEmail = prompt('New email address:', displayUser.email);
+    if (!newEmail || newEmail.trim() === displayUser.email) return;
+    const currentPassword = prompt('For security, enter your current password to confirm this change:');
+    if (!currentPassword) return;
+    try {
+      const credential = EmailAuthProvider.credential(displayUser.email, currentPassword);
+      await reauthenticateWithCredential(auth.currentUser, credential);
+      await verifyBeforeUpdateEmail(auth.currentUser, newEmail.trim());
+      alert(`A confirmation link was sent to ${newEmail.trim()}. Your email will update once you click it.`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Could not update email. Please check your password and try again.');
+    }
   }, [displayUser.email]);
 
   const handle2FAClick = useCallback(() => {
-    alert('Two-factor authentication is coming soon.');
+    // Real two-factor auth needs Firebase's phone multi-factor enrollment
+    // (reCAPTCHA + SMS verification + a second-factor challenge at every
+    // login) — that's a genuine standalone feature, not a settings toggle,
+    // and a fake "Enabled" switch here would be actively misleading for an
+    // app that holds real balances. Being upfront about that instead of
+    // faking it.
+    alert(
+      'Two-factor authentication isn\'t built yet.\n\nReal 2FA needs phone number verification (SMS code) wired into the login flow — it\'s a dedicated feature to build properly, not something a toggle here can safely turn on.'
+    );
   }, []);
 
+  const STREAM_QUALITY_OPTIONS = ['Auto', 'High', 'Medium', 'Low'] as const;
   const handleStreamQualityClick = useCallback(() => {
-    alert('Stream quality selection is coming soon — streams currently use a standard automatic quality.');
-  }, []);
+    setSettings((prev) => {
+      const currentIndex = STREAM_QUALITY_OPTIONS.indexOf(prev.streamQuality);
+      const nextQuality = STREAM_QUALITY_OPTIONS[(currentIndex + 1) % STREAM_QUALITY_OPTIONS.length];
+      const next = { ...prev, streamQuality: nextQuality };
+      saveSettings(next);
+      return next;
+    });
+  }, [saveSettings]);
 
   const handleMinGiftValueClick = useCallback(() => {
-    alert('Setting a minimum gift value is coming soon.');
-  }, []);
+    const input = prompt('Minimum gift value (in coins):', String(settings.minGiftValue));
+    if (input === null) return;
+    const parsed = parseInt(input, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      alert('Please enter a valid non-negative number of coins.');
+      return;
+    }
+    setSettings((prev) => {
+      const next = { ...prev, minGiftValue: parsed };
+      saveSettings(next);
+      return next;
+    });
+  }, [settings.minGiftValue, saveSettings]);
+
+  const WITHDRAWAL_NETWORKS = [
+    { id: 'trc20', label: 'TRC20 (Tron)' },
+    { id: 'erc20', label: 'ERC20 (Ethereum)' },
+    { id: 'bep20', label: 'BEP20 (BNB Chain)' },
+  ];
+
+  const saveWallet = useCallback((next: { address: string; network: string } | null) => {
+    if (!user?.uid) return;
+    setSavedWallet(next);
+    setDoc(doc(db, 'users', user.uid), { withdrawal: next }, { merge: true }).catch(() => {
+      alert('Could not save your wallet details. Please try again.');
+    });
+  }, [user?.uid]);
 
   const handleConnectedWalletsClick = useCallback(() => {
-    alert('Connected wallet management is coming soon. You can withdraw coins directly from the Wallet tab.');
-  }, []);
+    const input = prompt(
+      'Your withdrawal wallet address (this is what your coins get sent to):',
+      savedWallet?.address || ''
+    );
+    if (input === null) return;
+    const trimmed = input.trim();
+    if (!trimmed) {
+      saveWallet(null);
+      return;
+    }
+    saveWallet({ address: trimmed, network: savedWallet?.network || 'trc20' });
+  }, [savedWallet, saveWallet]);
 
   const handleTransactionHistoryClick = useCallback(() => {
     router.push('/');
@@ -182,11 +293,27 @@ export default function SettingsHome() {
   }, [router]);
 
   const handleWithdrawalSettingsClick = useCallback(() => {
-    alert('Withdrawal network/wallet configuration is coming soon. You can withdraw coins directly from the Wallet tab.');
-  }, []);
+    const optionsList = WITHDRAWAL_NETWORKS.map((n, i) => `${i + 1}. ${n.label}`).join('\n');
+    const input = prompt(`Preferred withdrawal network:\n${optionsList}\n\nEnter a number:`);
+    if (input === null) return;
+    const idx = parseInt(input, 10) - 1;
+    const chosen = WITHDRAWAL_NETWORKS[idx];
+    if (!chosen) {
+      alert('Please enter a valid option number.');
+      return;
+    }
+    saveWallet({ address: savedWallet?.address || '', network: chosen.id });
+  }, [savedWallet, saveWallet]);
 
   const handleLanguageClick = useCallback(() => {
-    alert('Language selection is coming soon — the app currently runs in English/Sinhala mixed UI.');
+    // The app's UI text is written in English throughout every screen —
+    // a language switch here would need a real translation system behind
+    // it (a string catalog + a provider wrapping the whole app), not just
+    // this dropdown relabeled. Flagging that honestly rather than shipping
+    // a selector that doesn't actually translate anything.
+    alert(
+      'Language switching isn\'t built yet.\n\nThe app\'s screens are written in English text directly — supporting Sinhala would need a proper translation system added across the app, not just this setting.'
+    );
   }, []);
 
   const handleClearCacheClick = useCallback(async () => {
@@ -228,7 +355,7 @@ export default function SettingsHome() {
           id: 'phone',
           label: 'Phone Number',
           icon: <Phone className="w-[18px] h-[18px]" style={{ color: '#128C7E' }} />,
-          value: 'Not set',
+          value: phoneNumber || 'Not set',
           onClick: handlePhoneClick,
         },
         {
@@ -314,7 +441,7 @@ export default function SettingsHome() {
           id: 'defaultQuality',
           label: 'Default Stream Quality',
           icon: <Monitor className="w-[18px] h-[18px]" style={{ color: '#128C7E' }} />,
-          value: 'Auto',
+          value: settings.streamQuality,
           onClick: handleStreamQualityClick,
         },
         {
@@ -329,7 +456,7 @@ export default function SettingsHome() {
           id: 'minGiftValue',
           label: 'Minimum Gift Value',
           icon: <Gift className="w-[18px] h-[18px]" style={{ color: '#8696A0' }} />,
-          value: '10 coins',
+          value: `${settings.minGiftValue} coins`,
           onClick: handleMinGiftValueClick,
         },
       ],
@@ -341,7 +468,7 @@ export default function SettingsHome() {
           id: 'connectedWallets',
           label: 'Connected Wallets',
           icon: <Wallet className="w-[18px] h-[18px]" style={{ color: '#805DE2' }} />,
-          value: '1 wallet',
+          value: savedWallet?.address ? '1 wallet' : 'Not set',
           onClick: handleConnectedWalletsClick,
         },
         {
@@ -354,6 +481,7 @@ export default function SettingsHome() {
           id: 'withdrawalSettings',
           label: 'Withdrawal Settings',
           icon: <Wallet className="w-[18px] h-[18px]" style={{ color: '#FFD700' }} />,
+          value: WITHDRAWAL_NETWORKS.find((n) => n.id === savedWallet?.network)?.label || 'Not set',
           onClick: handleWithdrawalSettingsClick,
         },
       ],
