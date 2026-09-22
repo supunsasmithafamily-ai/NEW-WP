@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, AlertTriangle, Wallet, ArrowDownLeft, Info } from 'lucide-react';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
 import { CoinIcon } from '@/components/three/CoinIcon';
 import { GlassmorphismCard } from '@/components/three/GlassmorphismCard';
 import { useAuth } from '@/hooks/useAuth';
@@ -31,6 +33,20 @@ export default function WithdrawForm({ isOpen, onClose, coinBalance }: WithdrawF
   const [selectedNetwork, setSelectedNetwork] = useState('trc20');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
+
+  // Pre-fill from the wallet saved in Settings → Connected Wallets /
+  // Withdrawal Settings, if there is one, so the person doesn't have to
+  // retype their address every time.
+  useEffect(() => {
+    if (!isOpen || !user?.uid) return;
+    getDoc(doc(db, 'users', user.uid)).then((snap) => {
+      const saved = snap.data()?.withdrawal;
+      if (saved?.address) setWalletAddress(saved.address);
+      if (saved?.network) setSelectedNetwork(saved.network);
+    }).catch(() => {
+      /* non-critical — the form still works with manual entry */
+    });
+  }, [isOpen, user?.uid]);
 
   const numAmount = parseFloat(amount) || 0;
   const estimatedUSD = numAmount * COIN_TO_USD_RATE;
